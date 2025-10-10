@@ -1,0 +1,11 @@
+idf_component_register(SRCS "grad_proj.c"
+                    "esp32_ascon/decrypt.c"
+                    "esp32_ascon/encrypt.c"
+                    "esp32_ascon/core.c"
+                    "esp32_ascon/permutations.c"
+                    "i2c_devices/AHT20.c"
+                    "i2c_devices/lsm6d.c"
+                    "i2c_devices/veml.c"
+                    "canascon/canascon.c"
+                    INCLUDE_DIRS "." "esp32_ascon"
+                    REQUIRES led_strip driver)
