@@ -8,4 +8,4 @@ idf_component_register(SRCS "grad_proj.c"
                     "i2c_devices/veml.c"
                     "canascon/canascon.c"
                     INCLUDE_DIRS "." "esp32_ascon"
-                    REQUIRES led_strip driver)
+                    REQUIRES led_strip driver bt)

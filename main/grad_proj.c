@@ -4,6 +4,7 @@
  * ============================================================================
  * Description: Modular sensor hub supporting multiple I2C sensors with
  *              CAN bus communication for distributed sensing applications.
+ *              With Ascon-128 encryption capabilities,
  *
  * Supported Sensors:
  *   - AHT20: Temperature & Humidity
@@ -44,12 +45,12 @@
 #include "esp_err.h"
 #include "esp_log.h"
 
-
 /* CAN (TWAI) */
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 #include "esp_twai_types.h"
 #include "hal/twai_types.h"
+
 
 /* LED Strip */
 #include "led_strip.h"
@@ -86,26 +87,27 @@
  *   1 => LSM6DSO32 (IMU)
  *   2 => VEML7700 (Light Sensor)
  */
-#define I2C_DEVICE (2)
+#define I2C_DEVICE (0)
 
 /* ---------- LED Configuration ---------- */
-#define LED_GPIO (27)
-#define LED_INDEX (0)
-#define LED_STRIP_RMT_RES_HZ (10 * 1000 * 1000)  // 10 MHz
-#define FULL_BRIGTNESS (255)
-#define HALF_BRIGTNESS (127)
-#define NO_BRIGTNESS (0)
+#define LED_STRIP_RMT_RES_HZ    (10 * 1000 * 1000)  // 10 MHz
+#define LED_INDEX               (0)
+#define LED_GPIO                (27)
+#define FULL_BRIGTNESS          (255)
+#define HALF_BRIGTNESS          (127)
+#define QUARTER_BRIGHTNESS      (63)
+#define NO_BRIGTNESS            (0)
 
 /* ---------- FreeRTOS Configuration ---------- */
-#define TASK_SIZE (1024 * 4)
-#define QueueSize (1)
-#define MAX_SEMAPHORE_COUNT (3)
+#define TASK_SIZE               (1024 * 4)
+#define QueueSize               (1)
+#define MAX_SEMAPHORE_COUNT     (3)
 
 /* ---------- CAN (TWAI) Configuration ---------- */
-#define CAN_RX_PIN (5)
-#define CAN_TX_PIN (4)
-#define CAN_QUEUE_SIZE (10)
-#define TWAI_NOMINAL_BITRATE (500000)
+#define CAN_RX_PIN              (5)
+#define CAN_TX_PIN              (4)
+#define CAN_QUEUE_SIZE          (10)
+#define TWAI_NOMINAL_BITRATE    (500000)
 #define TWAI_TAG "TWAI Device"
 
 /* ---------- I2C Configuration ---------- */
@@ -117,16 +119,6 @@
 /* ============================================================================
  * TYPE DEFINITIONS
  * ============================================================================ */
-
-/* ---------- LED Color Types ---------- */
-typedef enum {
-    RED,
-    GREEN,
-    BLUE,
-    YELLOW,
-    CYAN,
-    MAGENTA
-} led_color_type;
 
 /* ---------- CAN Network IDs ---------- */
 typedef enum {
@@ -214,7 +206,6 @@ twai_rx_done_callback(twai_node_handle_t handle,
             ESP_EARLY_LOGE("Callback Error", "Could not fill buffer");
         }
     }
-
     if (xHigherPriorityTaskWoken == pdTRUE) {
         portYIELD_FROM_ISR();
     }
@@ -224,6 +215,7 @@ twai_rx_done_callback(twai_node_handle_t handle,
 
 /* ---------- TWAI (CAN) Initialization ---------- */
 void twai_init() {
+
     twai_onchip_node_config_t node_config = {
         .io_cfg = {
             .rx = CAN_RX_PIN,
@@ -256,9 +248,11 @@ void twai_init() {
 #elif DEVICE_MODE == 2
     general_mask.id = IMU_SENSOR_ID;
     general_mask.mask = 0x7ff;
+    node_config.data_timing.bitrate = (TWAI_NOMINAL_BITRATE * 3);
 #elif DEVICE_MODE == 3
     general_mask.id = LIGHT_SENSOR_ID;
     general_mask.mask = 0x7ff;
+    node_config.data_timing.bitrate = (TWAI_NOMINAL_BITRATE * 3);
 #else
 #error "NO DEVICE SELECTED!"
 #endif
@@ -274,6 +268,7 @@ void twai_init() {
 /* ============================================================================
  * SENSOR TASK FUNCTIONS
  * ============================================================================ */
+
 
 /* ---------- AHT20 Temperature & Humidity Sensor Task ---------- */
 static void aht_20_sensor(void *arg) {
@@ -297,16 +292,19 @@ static void aht_20_sensor(void *arg) {
         memcpy(&i2c_msg.buffer[0], &aht.humidity_u, sizeof(aht.humidity_u));
         memcpy(&i2c_msg.buffer[4], &aht.temperature_u, sizeof(aht.temperature_u));
 
-        if ((twai_node_transmit(node_hdl, &i2c_msg, pdMS_TO_TICKS(100))) == ESP_OK) {
+        if ((twai_node_transmit(node_hdl, &i2c_msg, pdMS_TO_TICKS(100))) == ESP_OK && aht.status == ESP_OK){
             ESP_LOGI("AHT20 Device", "DATA -> Temperature %f | Humidity %f",
                      aht.temperature, aht.humidity);
+            led_strip_set_pixel(led_strip, 0, 0, QUARTER_BRIGHTNESS, 0);
         } else {
-            ESP_LOGE("TWAI TX", "Could startup the AHT20 Device!");
+            led_strip_set_pixel(led_strip, 0, QUARTER_BRIGHTNESS, 0, 0);
+            ESP_LOGE("TWAI TX", "Could send AHT20 data!");
         }
-
-        vTaskDelay(750 / portTICK_PERIOD_MS);
+        led_strip_refresh(led_strip);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
+
 
 /* ---------- LSM6DSO32 IMU Sensor Task ---------- */
 static void imu_sensor(void *arg) {
@@ -350,10 +348,14 @@ static void imu_sensor(void *arg) {
                      imu_data.accel_x, imu_data.accel_y, imu_data.accel_z);
             ESP_LOGI("GYRO", "Gyroscope => GX: %f | GY: %f | GZ: %f",
                      imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z);
+
+            led_strip_set_pixel(led_strip, 0, 0, QUARTER_BRIGHTNESS, 0);
         } else {
             ESP_LOGE("TWAI TX", "Could not send IMU Data!");
+            led_strip_set_pixel(led_strip, 0, QUARTER_BRIGHTNESS, 0, 0);
         }
-        vTaskDelay(750 / portTICK_PERIOD_MS);
+        led_strip_refresh(led_strip);
+        vTaskDelay(751 / portTICK_PERIOD_MS);
     }
 }
 /* ---------- VEML7700 Light Sensor Task ---------- */
@@ -379,6 +381,11 @@ static void veml_sensor_task(void *arg){
         .header.dlc = twaifd_len2dlc(sizeof(veml_buffer))
     };
 
+    // uint8_t key[16] = {
+    //     0xA3, 0x7F, 0x1C, 0xD9, 0x4B, 0x02, 0xE8, 0x55,
+    //     0x9A, 0x3D, 0x60, 0xF7, 0x8E, 0x21, 0xB4, 0xC0
+    // };
+
     /* Verify sensor ID */
     uint8_t foo = veml_check(&sensor);
     ESP_LOGI("ID CHECK", "ID => 0x%x", foo);
@@ -389,17 +396,26 @@ static void veml_sensor_task(void *arg){
     while(1){
         veml_read_lux(&sensor, &lux);
         veml_read_white(&sensor, &white);
-        ESP_LOGI("LUX DATA", "Lux => %.2f", lux);
-        ESP_LOGI("WHITE DATA", "White = %u", white);
         memcpy(&veml_buffer[0], &lux, sizeof(lux));
         memcpy(&veml_buffer[4], &white, sizeof(white));
         if((twai_node_transmit(node_hdl, &veml_msg, pdMS_TO_TICKS(100)))== ESP_OK){
             ESP_LOGI("LUX DATA", "Lux => %.2f", lux);
             ESP_LOGI("WHITE DATA", "White = %u", white);
-        }else {
-            ESP_LOGE("TWAI TX", "Could not send VEML data!");
+            led_strip_set_pixel(led_strip, 0, 0, QUARTER_BRIGHTNESS, 0);
+
+        }else{
+            ESP_LOGW("TRANSMIT ERROR","COULD NOT SEND DATA!!");
+            led_strip_set_pixel(led_strip, 0, QUARTER_BRIGHTNESS, 0, 0);
         }
-        vTaskDelay(250 / portTICK_PERIOD_MS);
+        led_strip_refresh(led_strip);
+        // esp_err_t result = encrypt_transmit_msg(LIGHT_SENSOR_ID, node_hdl, veml_buffer, sizeof(veml_buffer), key);
+        // if(result == ESP_OK){
+        //     //Green
+        //     led_strip_set_pixel(led_strip, uint32_t index, uint32_t red, uint32_t green, uint32_t blue)
+        // }else{
+        //     //Red
+        // }
+        vTaskDelay(502 / portTICK_PERIOD_MS);
     }
 }
 
@@ -410,47 +426,70 @@ static void veml_sensor_task(void *arg){
  /* ---------- Message Router and Processor ---------- */
 void messenger_manager(void *arg) {
     can_messasge_t queue_can;
+
     lsm6ds_imu_u rx_imu;
+    //Constants
+    // const size_t aht20_size = 8;
+    // const size_t light_size = 8;
+    // const size_t imu_size = 24;
 
     while (1) {
-        if (xQueueReceive(twai_queue_isr, &queue_can, portMAX_DELAY) == pdPASS) {
+        if (xQueueReceive(twai_queue_isr, &queue_can, pdMS_TO_TICKS(1000)) == pdPASS) {
             switch (queue_can.id) {
                 case TEMP_HUM_SENSOR_ID: {
                     float temp, hum;
                     memcpy(&hum, &queue_can.can_msg[0], sizeof(hum));
                     memcpy(&temp, &queue_can.can_msg[4], sizeof(temp));
-                    ESP_LOGI("AHT20 Device (Receieved)",
-                             "DATA -> Temperature %f | Humidity %f", temp, hum);
+                    printf("AHT20 Device: DATA -> Temperature %f | Humidity %f", temp, hum);
+                    led_strip_set_pixel(led_strip, 0, 0, QUARTER_BRIGHTNESS, 0);
+                    led_strip_refresh(led_strip);
                     break;
                 }
                 case IMU_SENSOR_ID: {
-                    // ESP_LOGI("IMU Device", "I got IMU data");
                     memcpy(rx_imu.lsm6ds_buff, &queue_can.can_msg,
                            sizeof(rx_imu.lsm6ds_buff));
-                    ESP_LOGI("ACCEL (Receieved)",
-                             "Acceleration => AX: %f | AY: %f | AZ: %f",
+                    printf("ACCEL: Acceleration => AX: %f | AY: %f | AZ: %f",
                              rx_imu.accel_x, rx_imu.accel_y, rx_imu.accel_z);
-                    ESP_LOGI("GYRO (Receieved)",
-                             "Gyroscope => GX: %f | GY: %f | GZ: %f",
+                    printf("GYRO (Receieved)L: Gyroscope => GX: %f | GY: %f | GZ: %f",
                              rx_imu.gyro_x, rx_imu.gyro_y, rx_imu.gyro_z);
+                    led_strip_set_pixel(led_strip, 0, 0, QUARTER_BRIGHTNESS, 0);
+                    led_strip_refresh(led_strip);
                     break;
                 }
                 case LIGHT_SENSOR_ID: {
-                    /* TODO: Implement VEML7700 data processing */
                     float lux;
                     uint16_t white;
                     memcpy(&lux, &queue_can.can_msg[0], sizeof(lux));
                     memcpy(&white, &queue_can.can_msg[4], sizeof(white));
-                    ESP_LOGI("LUX DATA", "Lux => %.2f", lux);
-                    ESP_LOGI("WHITE DATA", "White = %u", white);
+                    printf("LUX DATA: Lux => %.2f", lux);
+                    printf("WHITE DATA: White = %u", white);
+                    led_strip_set_pixel(led_strip, 0, 0, QUARTER_BRIGHTNESS, 0);
+                    led_strip_refresh(led_strip);
                     break;
                 }
-                case 0x231:{ //TESING CASE FOR ENCRYPTION
-                    for(uint8_t i = 0; i < queue_can.msg_size; i++){
-                        ESP_LOGI("RECEIVE CAN-ASCON FRAME","0x%x", queue_can.can_msg[i]);
-                    }
+                case 0x231:{
+                    size_t msg = encrypted_expected_msg_size(13); //magic number I know
+                    // printf("%d\n", msg);
+                    uint8_t incoming_msg[msg];
+                    uint8_t p[13]; //magic here too I know
+                    uint8_t msg_size = 0;
+                    uint8_t key[16] = { //temporary key
+                        0xA3, 0x7F, 0x1C, 0xD9, 0x4B, 0x02, 0xE8, 0x55,
+                        0x9A, 0x3D, 0x60, 0xF7, 0x8E, 0x21, 0xB4, 0xC0
+                    };
+                    memcpy(incoming_msg, queue_can.can_msg, msg);
+                    decrypt_transmission(0x231, incoming_msg, sizeof(incoming_msg), p, &msg_size, key);
+                    printf("Message Decrypted!\n");
+                    printf("%s\n", p);
+                    led_strip_set_pixel(led_strip, 0, 0, 0, QUARTER_BRIGHTNESS);
+                    led_strip_refresh(led_strip);
+                    break;
                 }
             }
+        }else{
+            ESP_LOGI("Awaiting", "No new data... yet");
+            led_strip_set_pixel(led_strip, 0, QUARTER_BRIGHTNESS, QUARTER_BRIGHTNESS, 0);
+            led_strip_refresh(led_strip);
         }
     }
 }
@@ -541,7 +580,6 @@ void tasks_init() {
 #endif
 }
 
-
 /* ============================================================================
  * APPLICATION ENTRY POINT
  * ============================================================================ */
@@ -553,10 +591,19 @@ void app_main(void) {
     i2c_master_init();
     tasks_init();
 
-    // uint8_t message[] = {0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12};
-    // encrypt_transmit_msg(0x231, node_hdl, message, sizeof(message));
 
-    // while(1){
-    //     vTaskDelay(1000/portTICK_PERIOD_MS);
-    // }
+    // uint8_t message[] = {0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12};
+    uint8_t message1[] = "Hello, World";
+    uint8_t key[16] = {
+        0xA3, 0x7F, 0x1C, 0xD9, 0x4B, 0x02, 0xE8, 0x55,
+        0x9A, 0x3D, 0x60, 0xF7, 0x8E, 0x21, 0xB4, 0xC0
+    };
+
+
+    while(1){
+        // printf("\n================Plaintext===================\n");
+        printf("%s\n", message1);
+        encrypt_transmit_msg(0x231, node_hdl, message1, sizeof(message1), key);
+        vTaskDelay(3000/portTICK_PERIOD_MS);
+    }
 }
