@@ -7,5 +7,6 @@ idf_component_register(SRCS "grad_proj.c"
                     "i2c_devices/lsm6d.c"
                     "i2c_devices/veml.c"
                     "canascon/canascon.c"
-                    INCLUDE_DIRS "." "esp32_ascon"
-                    REQUIRES led_strip driver bt)
+                    "bluetooth/gatt_svr.c"
+                    INCLUDE_DIRS "." "esp32_ascon" "./bluetooth"
+                    REQUIRES led_strip driver bt nvs_flash esp_hw_support mbedtls)

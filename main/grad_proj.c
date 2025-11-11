@@ -21,10 +21,12 @@
  * ============================================================================ */
 
 /* Standard Libraries */
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include <sys/_types.h>
 #include <sys/param.h>
 #include <sys/types.h>
@@ -36,6 +38,15 @@
 #include "freertos/semphr.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
+#include "freertos/event_groups.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs_adv.h"
+#include "host/ble_hs_id.h"
+#include "host/ble_hs_mbuf.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "os/os_mbuf.h"
 #include "portmacro.h"
 
 /* ESP-IDF Drivers */
@@ -45,12 +56,21 @@
 #include "esp_err.h"
 #include "esp_log.h"
 
+
 /* CAN (TWAI) */
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 #include "esp_twai_types.h"
 #include "hal/twai_types.h"
 
+/* Bluetooth */
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/util/util.h"
+#include "console/console.h"
+#include "services/gap/ble_svc_gap.h"
+#include "ble_fdcan_sens.h"
 
 /* LED Strip */
 #include "led_strip.h"
@@ -66,7 +86,6 @@
 #include "i2c_devices/lsm6d.h"
 #include "i2c_devices/veml.h"
 #include "canascon/canascon.h"
-
 /* ============================================================================
  * CONFIGURATION MACROS
  * ============================================================================ */
@@ -147,8 +166,214 @@ twai_node_handle_t node_hdl = NULL;
 
 /* ---------- FreeRTOS Objects ---------- */
 TaskHandle_t aht_device = NULL;
+static TimerHandle_t fdcan_tx_timer;
 QueueHandle_t twai_queue_isr;
 QueueHandle_t i2c_queue;
+
+/* ========================================================================================================================================================
+ * BLUETOOTH
+ * ======================================================================================================================================================== */
+
+static const char *device_name = "CRYPT0S_SENSOR_0.1";
+static uint8_t fdcanble_addr_type;
+static uint16_t conn_handle;
+static void fdcanble_advertise(void);
+static bool notify_state;
+static uint8_t fd_can_data = 15;
+
+static void tx_data_rate_stop(void){
+    xTimerStop(fdcan_tx_timer, 1000/portTICK_PERIOD_MS);
+}
+//Reset heart rate measurement
+static void tx_data_rate_reset(void){
+    int rc;
+    if(xTimerReset(fdcan_tx_timer, 1000/portTICK_PERIOD_MS) == pdPASS){
+        rc = 0;
+    }else{
+        rc = 1;
+    }
+    assert(rc == 0);
+}
+static void fdcanble_tx_data(TimerHandle_t ev){
+    static uint8_t fdcanble[2];
+    int rc;
+    struct os_mbuf *om;
+    if(!notify_state){
+        tx_data_rate_stop();
+        fd_can_data = 15;
+        return;
+    }
+    // fdcanble[0] = 0x05;
+    fdcanble[0] = fd_can_data;
+
+    fd_can_data++;
+    if(fd_can_data == 160){
+        fd_can_data = 15;
+    }
+    //Creata memory buffer from data
+    om = ble_hs_mbuf_from_flat(fdcanble, sizeof(fdcanble));
+    //Send notification to client
+    rc = ble_gatts_notify_custom(conn_handle, custom_data_handle, om);
+    assert(rc == 0);
+    tx_data_rate_reset();
+}
+
+
+
+static int fdcanble_gap_event(struct ble_gap_event *event, void *arg){
+    switch(event->type){
+        case BLE_GAP_EVENT_CONNECT: { //Connection established, save conn_handle
+            MODLOG_DFLT(INFO, "connection %s; status=%d\n",
+                        event->connect.status == 0 ? "established" : "failed",
+                        event->connect.status);
+            if (event->connect.status != 0) {
+                /* Connection failed; resume advertising */
+                fdcanble_advertise();
+            }
+            conn_handle = event->connect.conn_handle;
+            break;
+        }
+        case BLE_GAP_EVENT_DISCONNECT:{ //Connection lost, restart adverstising
+            MODLOG_DFLT(INFO, "disconnect; reason=%d\n", event->disconnect.reason);
+            //Connection terminated, resuming advertising
+            fdcanble_advertise();
+            break;
+        }
+        case BLE_GAP_EVENT_ADV_COMPLETE:{ //Advertising ended, restart adverstising
+            MODLOG_DFLT(INFO, "adv complete\n");
+            fdcanble_advertise();
+            break;
+        }
+        case BLE_GAP_EVENT_SUBSCRIBE:{ //Client enabled notifications, start sending data
+            MODLOG_DFLT(INFO, "subscribe event; cur_notify=%d\n value handle; "
+                        "val_handle=%d\n",
+                        event->subscribe.cur_notify, custom_data_handle);
+            if(event->subscribe.attr_handle == custom_data_handle){
+                notify_state = event->subscribe.cur_notify;
+                tx_data_rate_reset();
+            }else if(event->subscribe.attr_handle != custom_data_handle){
+                notify_state = event->subscribe.cur_notify;
+                tx_data_rate_stop();
+            }
+            break;
+        }
+        case BLE_GAP_EVENT_MTU:{ //MTU negotiated, Note max packet size
+            MODLOG_DFLT(INFO, "mtu update event; conn_handle=%d mtu=%d\n",
+                        event->mtu.conn_handle,
+                        event->mtu.value);
+            break;
+        }
+    }
+    return 0;
+}
+
+
+static void fdcanble_advertise(void){
+    struct ble_gap_adv_params adv_params;
+    struct ble_hs_adv_fields fields;
+    int rc;
+
+    /*
+     *  Set the advertisement data included in our advertisements:
+     *     o Flags (indicates advertisement type and other general info)
+     *     o Advertising tx power
+     *     o Device name
+     */
+    memset(&fields, 0, sizeof(fields));
+     /*
+      * Advertise two flags:
+      *      o Discoverability in forthcoming advertisement (general)
+      *      o BLE-only (BR/EDR unsupported)
+      */
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+      /*
+       * Indicate that the TX power level field should be included; have the
+       * stack fill this value automatically.  This is done by assigning the
+       * special value BLE_HS_ADV_TX_PWR_LVL_AUTO.
+       */
+    fields.tx_pwr_lvl_is_present = 1;
+    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+
+    fields.name = (uint8_t *)device_name;
+    fields.name_len = strlen(device_name);
+    fields.name_is_complete = 1;
+
+    rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "error setting advertisement data; rc=%d\n", rc);
+        return;
+    }
+
+       /* Begin advertising */
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    rc = ble_gap_adv_start(
+        fdcanble_addr_type,
+        NULL,
+        BLE_HS_FOREVER,
+        &adv_params,
+        fdcanble_gap_event,
+        NULL
+    );
+    if(rc != 0){
+        MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", rc);
+        return;
+    }
+}
+
+
+static void fdcan_ble_on_sync(void){
+    int rc;
+    rc = ble_hs_id_infer_auto(0, &fdcanble_addr_type);
+    assert(rc == 0);
+
+    uint8_t addr_val[6] = {0};
+    rc = ble_hs_id_copy_addr(fdcanble_addr_type, addr_val, NULL);
+
+    //Begin adverstising
+    fdcanble_advertise();
+}
+
+static void fdcan_ble_on_reset(int reason){
+    MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason);
+}
+
+static void fdcanble_host_task(void *param){
+    ESP_LOGI("NimBLE_FDCAN_BLE_DATA", "BLE Host Task Started");
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+ static void ble_init(){
+    int rc;
+    esp_err_t ret = nvs_flash_init();
+    if(ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND){
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    ret = nimble_port_init();
+
+
+    /* Initialize the NimBLE host configuration */
+    ble_hs_cfg.sync_cb = fdcan_ble_on_sync;
+    ble_hs_cfg.reset_cb = fdcan_ble_on_reset;
+
+    //Create a timer
+    fdcan_tx_timer = xTimerCreate("fdcanble_tx_timer", pdMS_TO_TICKS(1000), pdTRUE, NULL, fdcanble_tx_data);
+
+    rc = gatt_svr_init();
+    assert(rc == 0);
+
+    //Set the default device name
+    rc = ble_svc_gap_device_name_set(device_name);
+    assert(rc == 0);
+
+    //Start the task
+    nimble_port_freertos_init(fdcanble_host_task);
+}
+
 
 /* ============================================================================
  * TWAI (CAN) CALLBACK FUNCTIONS
@@ -268,7 +493,6 @@ void twai_init() {
 /* ============================================================================
  * SENSOR TASK FUNCTIONS
  * ============================================================================ */
-
 
 /* ---------- AHT20 Temperature & Humidity Sensor Task ---------- */
 static void aht_20_sensor(void *arg) {
@@ -494,7 +718,6 @@ void messenger_manager(void *arg) {
     }
 }
 
-
 /* ============================================================================
  * INITIALIZATION FUNCTIONS
  * ============================================================================ */
@@ -568,6 +791,7 @@ void tasks_init() {
     }
 
 #if DEVICE_MODE == 0
+    // nimble_ble_init();
     xTaskCreate(messenger_manager, "Messenger Manager", 4069, NULL, 7, NULL);
 #elif DEVICE_MODE == 1
     xTaskCreate(aht_20_sensor, "AHT20 Sensor Func", 4096, NULL, 5, &aht_device);
@@ -580,9 +804,9 @@ void tasks_init() {
 #endif
 }
 
-/* ============================================================================
+/* ========================================================================================================================================================
  * APPLICATION ENTRY POINT
- * ============================================================================ */
+ * ======================================================================================================================================================== */
 
 void app_main(void) {
     /* ---------- Initialize Peripherals ---------- */
@@ -590,20 +814,19 @@ void app_main(void) {
     twai_init();
     i2c_master_init();
     tasks_init();
+    ble_init();
 
 
-    // uint8_t message[] = {0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12,0x32, 0xa7, 0x8a, 0x12};
-    uint8_t message1[] = "Hello, World";
-    uint8_t key[16] = {
-        0xA3, 0x7F, 0x1C, 0xD9, 0x4B, 0x02, 0xE8, 0x55,
-        0x9A, 0x3D, 0x60, 0xF7, 0x8E, 0x21, 0xB4, 0xC0
-    };
-
+    // uint8_t message1[] = "Hello, World";
+    // uint8_t key[16] = {
+    //     0xA3, 0x7F, 0x1C, 0xD9, 0x4B, 0x02, 0xE8, 0x55,
+    //     0x9A, 0x3D, 0x60, 0xF7, 0x8E, 0x21, 0xB4, 0xC0
+    // };
 
     while(1){
-        // printf("\n================Plaintext===================\n");
-        printf("%s\n", message1);
-        encrypt_transmit_msg(0x231, node_hdl, message1, sizeof(message1), key);
-        vTaskDelay(3000/portTICK_PERIOD_MS);
+        // printf("%s\n", message1);
+        // encrypt_transmit_msg(0x231, node_hdl, message1, sizeof(message1), key);
+        vTaskDelay(1000/portTICK_PERIOD_MS);
     }
+
 }

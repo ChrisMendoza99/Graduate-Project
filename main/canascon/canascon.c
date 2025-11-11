@@ -6,6 +6,7 @@
 #include "hal/twai_types.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/_types.h>
 #include "esp32_ascon/encrypt.h"
@@ -155,7 +156,7 @@ esp_err_t decrypt_transmission(uint16_t can_id,
         ESP_LOGE("SIZE ERROR", "Message size exceeds 64 bytes (CAN FD limit)!");
         return ESP_FAIL;
     }
-
+    printf("%d\n", crypto_message_len);
     // --- Separate ciphertext and nonce ---
     uint8_t ciphertext_size = crypto_message_len - ASCON_NONCE_SIZE;
     uint8_t ciphertext_msg[ciphertext_size];
@@ -166,7 +167,7 @@ esp_err_t decrypt_transmission(uint16_t can_id,
 
     printf("================Full Encryption Message================\n");
     for (int i = 0; i < crypto_message_len; i++) {
-      printf("%02x ", ciphertext_msg[i]);
+      printf("%02x ", crypto_message[i]);
       if ((i + 1) % 16 == 0 || i + 1 == crypto_message_len) {
         printf(" ");
         printf("\n");
