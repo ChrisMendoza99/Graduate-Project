@@ -64,6 +64,7 @@ This project implements a comprehensive multi-sensor hub using the ESP32-C5 micr
 
 ## 📸 Screenshots
 ![App Screenshot](https://github.com/ChrisMendoza99/Graduate-Project/blob/main/pictures/ESP32C5_StackBoard.jpg)
+![App Screenshot](https://github.com/ChrisMendoza99/Graduate-Project/blob/main/pictures/IMG_6477.png)
 
 ## 📝 License
 
