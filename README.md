@@ -52,6 +52,7 @@ This project implements a comprehensive multi-sensor hub using the ESP32-C5 micr
 │   ├── bluetooth
 │   │   ├── ble_fdcan_sens.h
 │   │   └── gatt_svr.c
+|   |   └── esp_ble.c
 │   ├── i2c_devices
 │   │   ├── AHT20.h
 │   │   ├── lsm6d.h
