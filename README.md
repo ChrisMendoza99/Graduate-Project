@@ -1,12 +1,12 @@
 # 📡 ESP32-C5 Multi-Sensor Hub 🌐
 
-This project implements a comprehensive multi-sensor hub using the ESP32-C5 microcontroller. It integrates data from various sensors (temperature, humidity, IMU, ambient light), transmits this data over a CAN bus (with optional encryption using either AES-CCM or Ascon-128), and provides Bluetooth Low Energy (BLE) connectivity for remote access. The system also includes an LED strip for visual feedback.
+This project implements a comprehensive multi-sensor hub using the ESP32-C5 microcontroller. It integrates data from various sensors (temperature, humidity, IMU, ambient light), transmits this data over a CAN bus (with optional encryption using Ascon-128), and provides Bluetooth Low Energy (BLE) connectivity for remote access. The system also includes an LED strip for visual feedback.
 
 ## 🚀 Key Features
 
 *   **Multi-Sensor Integration:** Reads data from AHT20 (temperature/humidity), LSM6DSO32 (IMU), and VEML7700 (ambient light) sensors. 🌡️
 *   **CAN Bus Communication:** Transmits sensor data over a CAN bus using the TWAI controller. 🚗
-*   **Encryption Options:** Supports CAN bus message encryption using either AES-CCM or Ascon-128 algorithms for secure communication. 🔒
+*   **Encryption Options:** Supports CAN bus message encryption using Ascon-128 algorithms for secure communication. 🔒
 *   **Bluetooth Low Energy (BLE):** Enables remote access to sensor data via BLE using the NimBLE stack. 📱
 *   **LED Strip Control:** Provides visual feedback through an LED strip, indicating system status or sensor readings. 💡
 *   **User-Friendly Flashing:** Includes a bash script for easy flashing and monitoring of ESP32 devices. ⚡
